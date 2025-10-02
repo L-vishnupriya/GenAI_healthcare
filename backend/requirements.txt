@@ -1,0 +1,7 @@
+agno
+phidata
+faker
+uvicorn
+fastapi
+python-dotenv
+openai

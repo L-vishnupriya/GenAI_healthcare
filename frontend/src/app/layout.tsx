@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import React, { ReactNode } from 'react';
+import { CopilotKit } from '@copilotkit/react-core';
+import "@copilotkit/react-ui/styles.css";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -12,11 +15,17 @@ export const metadata: Metadata = {
 export default function RootLayout({
   children,
 }: Readonly<{
-  children: React.ReactNode;
+  children: ReactNode;
 }>) {
+  const BACKEND_URL = process.env.NEXT_PUBLIC_AGNO_BACKEND_URL || 'http://localhost:8000';
+
   return (
     <html lang="en">
-      <body className={inter.className}>{children}</body>
+      <body className={inter.className}>
+        <CopilotKit runtimeUrl={BACKEND_URL}>
+          {children}
+        </CopilotKit>
+      </body>
     </html>
   );
 }

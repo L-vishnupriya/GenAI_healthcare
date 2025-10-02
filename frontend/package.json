@@ -1,0 +1,30 @@
+{
+    "name": "healthcare-frontend",
+    "version": "0.1.0",
+    "private": true,
+    "scripts": {
+      "dev": "next dev",
+      "build": "next build",
+      "start": "next start",
+      "lint": "next lint"
+    },
+    "dependencies": {
+      "@copilotkit/react-core": "latest",
+      "@copilotkit/react-ui": "latest",
+      "@ag-ui/client": "latest", 
+      "next": "latest",
+      "react": "^18.3.1",
+      "react-dom": "^18.3.1",
+      "recharts": "^2.12.7",
+      "tailwindcss": "latest",
+      "lucide-react": "^0.395.0"
+    },
+    "devDependencies": {
+      "@types/node": "latest",
+      "@types/react": "latest",
+      "@types/react-dom": "latest",
+      "typescript": "latest",
+      "autoprefixer": "latest",
+      "postcss": "latest"
+    }
+  }

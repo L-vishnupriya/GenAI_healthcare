@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: healthcare_backend
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DB_FILE=/app/data/user_data.db
+      - AGNO_HOST=0.0.0.0
+      - AGNO_PORT=8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - user_data_volume:/app/data
+    networks:
+      - healthcare_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: healthcare_frontend
+    environment:
+      - NEXT_PUBLIC_AGNO_BACKEND_URL=http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - healthcare_network
+
+networks:
+  healthcare_network:
+    driver: bridge
+
+volumes:
+  user_data_volume:
+    driver: local

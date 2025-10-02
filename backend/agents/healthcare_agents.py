@@ -1,185 +1,316 @@
-import os
-import sqlite3
-import logging
-from typing import List, Dict, Any
+"""
+Healthcare Agent Definitions
+"""
 
-# Agno/Phidata imports
+import os
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
-from agno.tools import Function
+from .tools import DatabaseTool
 
-# Set up logging
-logger = logging.getLogger(__name__)
+# Configuration - Use Groq for faster responses
+LLM_MODEL = "llama-3.1-70b-versatile"  # Groq model
+db_tool = DatabaseTool()
 
-# --- Configuration ---
-DB_FILE = os.environ.get("DB_FILE", "/app/data/user_data.db")
-LLM_MODEL = OpenAIChat(id="gpt-4o-mini", temperature=0.7)
-
-# --- Shared Database Tool ---
-class DatabaseTool(Function):
-    """Manages CRUD operations for user profiles and log tables."""
-    name: str = "DatabaseTool"
-    description: str = "Manages user profiles and logs (mood, CGM, food). Use ONLY for data lookups and storage."
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def run(self, action: str, user_id: int = None, **kwargs) -> str:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
+def get_greeting_agent() -> Agent:
+    """Agent that greets users and validates their ID"""
+    
+    def validate_and_greet(user_id: int) -> str:
+        """Validate user ID and return greeting"""
+        result = db_tool.validate_user(user_id)
         
-        try:
-            # --- Validation & Fetch ---
-            if action == "validate_user":
-                cursor.execute("SELECT first_name, city, diet_preference, medical_conditions FROM users WHERE user_id = ?", (user_id,))
-                user = cursor.fetchone()
-                if user:
-                    return f"Valid: Name={user[0]}, City={user[1]}, Diet={user[2]}, Conditions={user[3]}"
-                return "Invalid user ID."
-
-            elif action == "get_user_profile":
-                cursor.execute("SELECT first_name, diet_preference, medical_conditions FROM users WHERE user_id = ?", (user_id,))
-                user = cursor.fetchone()
-                return f"Profile: Diet={user[1]}, Conditions={user[2]}" if user else "User not found."
-
-            # --- Logging ---
-            elif action == "log_mood":
-                cursor.execute("INSERT INTO mood_logs (user_id, mood) VALUES (?, ?)", (user_id, kwargs.get('mood')))
-                conn.commit()
-                return f"Mood '{kwargs.get('mood')}' logged successfully."
+        if result["valid"]:
+            return f"""User validated successfully!
             
-            elif action == "log_cgm":
-                reading = kwargs.get('reading')
-                if reading < 80 or reading > 300:
-                    return f"ALERT: CGM reading {reading} is outside the standard range (80-300 mg/dL). Logged and flagged."
-                cursor.execute("INSERT INTO cgm_logs (user_id, glucose_reading) VALUES (?, ?)", (user_id, reading))
-                conn.commit()
-                return f"CGM reading {reading} mg/dL logged successfully."
+Name: {result['first_name']} {result['last_name']}
+City: {result['city']}
+Diet: {result['diet_preference']}
+Medical Conditions: {result['medical_conditions']}
+Physical Limitations: {result['physical_limitations']}
 
-            elif action == "log_food":
-                cursor.execute("INSERT INTO food_logs (user_id, meal_description) VALUES (?, ?)", (user_id, kwargs.get('meal_description')))
-                conn.commit()
-                return f"Meal '{kwargs.get('meal_description')}' logged successfully for nutrient categorization."
+Hello, {result['first_name']} from {result['city']}! 👋
 
-            # --- Reporting / Chart Data ---
-            elif action == "get_logs":
-                log_type = kwargs.get('log_type')
-                limit = kwargs.get('limit', 7)
-                
-                if log_type == 'cgm':
-                    cursor.execute(f"SELECT timestamp, glucose_reading FROM cgm_logs WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
-                elif log_type == 'mood':
-                    cursor.execute(f"SELECT timestamp, mood FROM mood_logs WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
-                else:
-                    return f"Unknown log type: {log_type}"
-                    
-                logs = cursor.fetchall()
-                return str(logs) # Return simple string for LLM processing
-            
-            else:
-                return f"Unknown database action: {action}"
-        except Exception as e:
-            logger.error(f"Database Error: {e}")
-            return f"Database operation failed due to: {e}"
-        finally:
-            conn.close()
-
-# --- Agent Definitions ---
-
-# 1. Greeting Agent (Authentication & Validation)
-def get_greeting_agent(db_tool: DatabaseTool):
+How can I assist you today? I can help you with:
+- Logging your mood
+- Recording CGM readings
+- Tracking food intake
+- Generating personalized meal plans
+- Answering general questions"""
+        else:
+            return "❌ Invalid User ID. Please enter a valid ID between 1 and 100."
+    
     return Agent(
         name="Greeting Agent",
-        model=LLM_MODEL,
-        tools=[db_tool],
+        model=OpenAIChat(
+            id=LLM_MODEL,
+            api_key=os.environ.get("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1"
+        ),
+        tools=[validate_and_greet],
         instructions=[
-            "You are the entry point. Start by asking the user for their integer User ID.",
-            "Use the DatabaseTool (action='validate_user') to verify the ID.",
-            "If invalid, prompt the user to re-enter a valid ID.",
-            "If valid, retrieve their name and city from the tool output. Greet them personally: 'Hello, [Name] from [City]! How can I assist you today?'",
-            "After greeting, suggest main actions: Mood tracking, CGM logging, or Meal planning."
-        ]
+            "You are a friendly healthcare assistant.",
+            "Your first task is to ask the user for their User ID (1-100).",
+            "Once you receive a user ID, call the validate_and_greet function.",
+            "If the ID is invalid, politely ask them to try again.",
+            "If valid, show the greeting message and ask how you can help.",
+        ],
+        markdown=True
     )
 
-# 2. Mood Tracker Agent
-def get_mood_tracker_agent(db_tool: DatabaseTool):
+def get_mood_tracker_agent() -> Agent:
+    """Agent that tracks user mood"""
+    
+    def log_mood_function(user_id: int, mood: str) -> str:
+        """Log mood and calculate summary"""
+        result = db_tool.log_mood(user_id, mood)
+        logs = db_tool.get_mood_logs(user_id, limit=7)
+        
+        # Calculate mood frequency
+        mood_counts = {}
+        for log in logs:
+            m = log["mood"]
+            mood_counts[m] = mood_counts.get(m, 0) + 1
+        
+        summary = "\n".join([f"• {m}: {c} time(s)" for m, c in mood_counts.items()])
+        
+        return f"""✅ {result['message']}
+
+📊 Your 7-day mood summary:
+{summary}
+
+Your mood has been logged successfully!"""
+    
     return Agent(
         name="Mood Tracker Agent",
-        model=LLM_MODEL,
-        tools=[db_tool],
+        model=OpenAIChat(
+            id=LLM_MODEL,
+            api_key=os.environ.get("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1"
+        ),
+        tools=[log_mood_function],
         instructions=[
-            "You track the user's emotional state. Ask the user for their current mood.",
-            "Once received, log it using the DatabaseTool (action='log_mood').",
-            "After logging, retrieve the last 7 mood logs (action='get_logs', log_type='mood', limit=7).",
-            "Compute the rolling average mood (e.g., 'Your mood has been slightly lower this week').",
-            "Confirm the log and provide a brief analysis. Always route the user back to the main menu."
-        ]
+            "You help users log their mood.",
+            "Ask the user: 'How are you feeling right now?' (happy, sad, tired, excited, anxious, etc.)",
+            "Once they provide their mood, call log_mood_function with their user_id and mood.",
+            "After logging, show them the 7-day summary.",
+            "Be empathetic and supportive in your responses.",
+        ],
+        markdown=True
     )
 
-# 3. CGM Agent (Continuous Glucose Monitor)
-def get_cgm_agent(db_tool: DatabaseTool):
+def get_cgm_agent() -> Agent:
+    """Agent that logs CGM readings"""
+    
+    def log_cgm_function(user_id: int, glucose_reading: int) -> str:
+        """Log CGM reading"""
+        result = db_tool.log_cgm(user_id, glucose_reading)
+        
+        message = f"""✅ {result['message']}"""
+        
+        if result.get("alert"):
+            message += f"\n\n{result['alert']}"
+        
+        # Get recent readings
+        logs = db_tool.get_cgm_logs(user_id, limit=7)
+        if logs:
+            avg = sum(log["glucose"] for log in logs) / len(logs)
+            message += f"\n\n📊 7-day average: {avg:.1f} mg/dL"
+        
+        return message
+    
     return Agent(
         name="CGM Agent",
-        model=LLM_MODEL,
-        tools=[db_tool],
+        model=OpenAIChat(
+            id=LLM_MODEL,
+            api_key=os.environ.get("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1"
+        ),
+        tools=[log_cgm_function],
         instructions=[
-            "You manage glucose readings. Ask the user for their current CGM reading (an integer, mg/dL).",
-            "Use the DatabaseTool (action='log_cgm') to store the reading. The tool will flag alerts if the value is outside 80-300 mg/dL.",
-            "Acknowledge the reading and inform the user of any alerts flagged by the tool. Always route the user back to the main menu."
-        ]
+            "You help users log their Continuous Glucose Monitor (CGM) readings.",
+            "Ask for their current glucose reading in mg/dL.",
+            "Normal range is 80-300 mg/dL.",
+            "Call log_cgm_function with user_id and glucose_reading.",
+            "If the reading is outside the normal range, acknowledge the alert.",
+            "Provide the 7-day average if available.",
+        ],
+        markdown=True
     )
 
-# 4. Food Intake Agent (Nutrient Categorization)
-def get_food_intake_agent(db_tool: DatabaseTool):
+def get_food_intake_agent() -> Agent:
+    """Agent that logs food intake and categorizes nutrients"""
+    
+    def log_food_function(user_id: int, meal_description: str) -> str:
+        """Log food and categorize nutrients using LLM"""
+        
+        # Use LLM to categorize nutrients
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=os.environ.get("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1"
+        )
+        
+        response = client.chat.completions.create(
+            model="llama-3.1-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You are a nutrition expert. Analyze the meal and estimate macronutrients. Respond ONLY with format: 'Carbs: Xg, Protein: Yg, Fat: Zg'"},
+                {"role": "user", "content": f"Analyze this meal: {meal_description}"}
+            ],
+            max_tokens=50
+        )
+        
+        nutrients = response.choices[0].message.content.strip()
+        
+        # Log to database
+        result = db_tool.log_food(user_id, meal_description, nutrients)
+        
+        return f"""✅ {result['message']}
+
+🍽️ Meal: {meal_description}
+📊 Estimated nutrients: {nutrients}
+
+Your food intake has been logged!"""
+    
     return Agent(
         name="Food Intake Agent",
-        model=LLM_MODEL,
-        tools=[db_tool],
+        model=OpenAIChat(
+            id=LLM_MODEL,
+            api_key=os.environ.get("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1"
+        ),
+        tools=[log_food_function],
         instructions=[
-            "You record meals and categorize nutrients. Ask the user for a description of their meal or snack.",
-            "Log the free-text description using the DatabaseTool (action='log_food').",
-            "THEN, use your LLM capabilities to analyze the meal description and categorize the nutrients into Carbs, Protein, and Fat (e.g., '1 cup oatmeal with berries' is 'High Carb, Moderate Fiber, Low Fat').",
-            "Confirm the log and provide the nutrient categorization. Always route the user back to the main menu."
-        ]
+            "You help users log their food intake.",
+            "Ask them to describe what they ate (e.g., 'oatmeal with berries and coffee').",
+            "Call log_food_function to log the meal and get nutrient analysis.",
+            "Show the meal description and estimated macronutrients.",
+            "Be encouraging and supportive about their food choices.",
+        ],
+        markdown=True
     )
 
-# 5. Meal Planner Agent (Adaptive Logic)
-def get_meal_planner_agent(db_tool: DatabaseTool):
+def get_meal_planner_agent() -> Agent:
+    """Agent that generates adaptive meal plans"""
+    
+    def generate_meal_plan(user_id: int) -> str:
+        """Generate adaptive 3-meal plan"""
+        
+        # Get user profile
+        user = db_tool.validate_user(user_id)
+        
+        # Get latest CGM reading
+        cgm_logs = db_tool.get_cgm_logs(user_id, limit=1)
+        latest_cgm = cgm_logs[0]["glucose"] if cgm_logs else None
+        
+        # Get recent moods
+        mood_logs = db_tool.get_mood_logs(user_id, limit=3)
+        recent_moods = [log["mood"] for log in mood_logs] if mood_logs else []
+        
+        # Create adaptive prompt
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=os.environ.get("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1"
+        )
+        
+        prompt = f"""Generate a personalized 3-meal plan for today.
+
+User Profile:
+- Diet: {user['diet_preference']}
+- Medical Conditions: {user['medical_conditions']}
+- Physical Limitations: {user['physical_limitations']}
+- Latest CGM: {latest_cgm} mg/dL (Normal: 80-300)
+- Recent Moods: {', '.join(recent_moods) if recent_moods else 'No data'}
+
+IMPORTANT ADAPTIVE RULES:
+1. If CGM > 200 or < 85: Prioritize LOW-CARB, HIGH-FIBER meals to stabilize glucose
+2. If "Type 2 Diabetes" in conditions: All meals must be diabetes-friendly (low GI, high fiber)
+3. If "Celiac Disease": Must be gluten-free
+4. If physical limitations include swallowing difficulties: Recommend soft, easy-to-swallow foods
+5. Respect diet preference (vegetarian/vegan/non-vegetarian)
+
+Format your response EXACTLY as:
+
+🌅 BREAKFAST: [Meal Name]
+- [Item 1]
+- [Item 2]
+- [Item 3]
+📊 Macros: Carbs: Xg | Protein: Yg | Fat: Zg
+💡 Note: [Why this meal is appropriate]
+
+☀️ LUNCH: [Meal Name]
+- [Item 1]
+- [Item 2]
+- [Item 3]
+📊 Macros: Carbs: Xg | Protein: Yg | Fat: Zg
+💡 Note: [Why this meal is appropriate]
+
+🌙 DINNER: [Meal Name]
+- [Item 1]
+- [Item 2]
+- [Item 3]
+📊 Macros: Carbs: Xg | Protein: Yg | Fat: Zg
+💡 Note: [Why this meal is appropriate]
+
+🎯 PLAN RATIONALE:
+[1-2 sentences explaining why this plan is adaptive to their current health status]"""
+
+        response = client.chat.completions.create(
+            model="llama-3.1-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You are an expert nutritionist and meal planner."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1000
+        )
+        
+        meal_plan = response.choices[0].message.content
+        
+        return f"""🍽️ **Your Personalized Meal Plan**
+
+{meal_plan}
+
+---
+✅ This plan has been generated based on your current health data and will help you achieve your wellness goals!"""
+    
     return Agent(
         name="Meal Planner Agent",
-        model=LLM_MODEL,
-        tools=[db_tool],
+        model=OpenAIChat(
+            id=LLM_MODEL,
+            api_key=os.environ.get("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1"
+        ),
+        tools=[generate_meal_plan],
         instructions=[
-            "Your goal is to generate an adaptive, 3-meal plan (Breakfast, Lunch, Dinner).",
-            "1. Use DatabaseTool (action='get_user_profile') to fetch the user's diet and conditions.",
-            "2. Use DatabaseTool (action='get_logs', log_type='cgm', limit=1) to get the latest glucose reading.",
-            "3. **Adaptive Logic:** If the latest CGM reading is **above 250 mg/dL**, the plan MUST be **Low-Glycemic Index, low-carb** to manage blood sugar.",
-            "4. The plan MUST strictly adhere to the user's dietary preference (vegetarian/vegan/non-vegetarian) and medical conditions (e.g., low-sodium for Hypertension).",
-            "5. The final output must be a well-formatted list of 3 meals, including the primary macro-focus for each (e.g., 'High Protein')."
-        ]
+            "You are a personalized meal planning assistant.",
+            "When a user asks for a meal plan, call generate_meal_plan with their user_id.",
+            "The function will create an adaptive plan based on their:",
+            "  - Dietary preferences",
+            "  - Medical conditions",
+            "  - Latest CGM reading",
+            "  - Recent mood trends",
+            "  - Physical limitations",
+            "Present the meal plan in a clear, organized format.",
+            "Explain why the plan is appropriate for their specific needs.",
+        ],
+        markdown=True
     )
 
-# 6. Interrupt Agent (General Q&A)
-def get_interrupt_agent():
+def get_interrupt_agent() -> Agent:
+    """Agent that handles general Q&A and interruptions"""
+    
     return Agent(
-        name="Interrupt Agent (Q&A)",
-        model=LLM_MODEL,
+        name="Interrupt Agent",
+        model=OpenAIChat(
+            id=LLM_MODEL,
+            api_key=os.environ.get("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1"
+        ),
         instructions=[
-            "You are a general assistant, always ready to answer non-contextual, unrelated questions (e.g., 'What is the capital of France?').",
-            "Answer the query concisely using your general knowledge.",
-            "After answering, you MUST inform the user that you are returning them to their previous task or the main menu.",
-            "NEVER handle queries related to the current healthcare flow (mood, CGM, food, or planning)."
-        ]
+            "You are a general knowledge assistant.",
+            "You can answer ANY question the user asks, even if unrelated to healthcare.",
+            "After answering, ALWAYS say: 'Is there anything else related to your health tracking I can help you with?'",
+            "Be concise but informative.",
+            "If the question IS related to health tracking (mood, CGM, food, meals), redirect to the appropriate agent.",
+        ],
+        markdown=True
     )
-
-# --- AgentOS Setup ---
-def get_all_agents(db_tool: DatabaseTool) -> List[Agent]:
-    """Returns a list of all agents for AgentOS to expose."""
-    return [
-        get_greeting_agent(db_tool),
-        get_mood_tracker_agent(db_tool),
-        get_cgm_agent(db_tool),
-        get_food_intake_agent(db_tool),
-        get_meal_planner_agent(db_tool),
-        get_interrupt_agent() 
-    ]

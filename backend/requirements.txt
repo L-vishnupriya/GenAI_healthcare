@@ -1,7 +1,8 @@
-agno
-phidata
-faker
-uvicorn
-fastapi
-python-dotenv
-openai
+agno==1.1.6
+phidata==2.4.0
+faker==22.0.0
+openai>=1.30.0
+uvicorn[standard]==0.27.0
+fastapi==0.109.0
+python-dotenv==1.0.0
+sqlalchemy==2.0.25
